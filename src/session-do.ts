@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { Pending } from "./pending";
 import {
   asRecord,
   parseClientMessage,
@@ -13,20 +14,12 @@ import {
 
 interface PendingPermissionState {
   payload: PendingPermission;
-  resolve: (decision: PermissionDecision | null) => void;
-  timer: ReturnType<typeof setTimeout>;
+  request: Pending<PermissionDecision>;
 }
-
-interface PendingStopState {
-  resolve: (text: string | null) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
-const REQUEST_TIMEOUT_MS = 590_000;
 
 export class SessionDO extends DurableObject<Env> {
   private readonly pendingPermissions = new Map<string, PendingPermissionState>();
-  private pendingStop: PendingStopState | null = null;
+  private pendingStop: Pending<string> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -130,13 +123,11 @@ export class SessionDO extends DurableObject<Env> {
         this.send(socket, { type: "error", message: "permission request is no longer pending" });
         return;
       }
-      clearTimeout(pending.timer);
-      this.pendingPermissions.delete(message.id);
       const decision: PermissionDecision = {
         behavior: message.behavior,
         ...(message.always && message.behavior === "allow" ? { updatedPermissions: pending.payload.permissionSuggestions } : {}),
       };
-      pending.resolve(decision);
+      pending.request.settle(decision);
       return;
     }
     if (message.type === "message") {
@@ -144,10 +135,7 @@ export class SessionDO extends DurableObject<Env> {
         this.send(socket, { type: "error", message: "session is not waiting for a message" });
         return;
       }
-      const pending = this.pendingStop;
-      this.pendingStop = null;
-      clearTimeout(pending.timer);
-      pending.resolve(message.text);
+      this.pendingStop.settle(message.text);
       return;
     }
     void this.setInterrupt().then(() => this.send(socket, { type: "interrupt_ack" }));
@@ -165,37 +153,32 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   private async waitForPermission(payload: PermissionPayload): Promise<PermissionDecision | null> {
-    if (this.ctx.getWebSockets().length === 0) return null;
     const pending: PendingPermission = {
       id: crypto.randomUUID(),
       createdAt: Date.now(),
       ...payload,
     };
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingPermissions.delete(pending.id);
-        resolve(null);
-      }, REQUEST_TIMEOUT_MS);
-      this.pendingPermissions.set(pending.id, { payload: pending, resolve, timer });
-      this.broadcast({ type: "permission", id: pending.id, toolName: pending.toolName, toolInput: pending.toolInput, suggestions: pending.permissionSuggestions });
+    const request = new Pending<PermissionDecision>({
+      isConnected: () => this.ctx.getWebSockets().length > 0,
+      onSettled: () => { this.pendingPermissions.delete(pending.id); },
     });
+    if (!request.waiting) return null;
+    this.pendingPermissions.set(pending.id, { payload: pending, request });
+    this.broadcast({ type: "permission", id: pending.id, toolName: pending.toolName, toolInput: pending.toolInput, suggestions: pending.permissionSuggestions });
+    return request.promise;
   }
 
   private async waitForStop(): Promise<string | null> {
-    if (this.ctx.getWebSockets().length === 0) return null;
-    if (this.pendingStop) {
-      const previous = this.pendingStop;
-      this.pendingStop = null;
-      clearTimeout(previous.timer);
-      previous.resolve(null);
-    }
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingStop = null;
-        resolve(null);
-      }, REQUEST_TIMEOUT_MS);
-      this.pendingStop = { resolve, timer };
+    this.pendingStop?.settle(null);
+    let stored = false;
+    const request = new Pending<string>({
+      isConnected: () => this.ctx.getWebSockets().length > 0,
+      onSettled: () => { if (stored) this.pendingStop = null; },
     });
+    if (!request.waiting) return null;
+    stored = true;
+    this.pendingStop = request;
+    return request.promise;
   }
 
   private async recordMessage(text: string): Promise<void> {
