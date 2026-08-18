@@ -1886,6 +1886,6 @@ direct p50 306.7 / p95 384.9；proxy p50 410.4 / p95 819.4，失败数均为 0�
 
 > Task 8 Step 8 填写。
 
-- Worker 地址：待填
-- 手机移动网络可达性：待填
-- 部署日期：待填
+- Worker 地址：`https://claude-remote-control.2519175810.workers.dev`
+- 手机移动网络可达性：待用移动数据实测
+- 部署日期：2026-08-18
