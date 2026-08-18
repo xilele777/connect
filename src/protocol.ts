@@ -25,18 +25,23 @@ export interface RecentMessage {
 export interface Snapshot {
   pending: PendingPermission[];
   recent: RecentMessage[];
+  /** Whether remote mode is enabled; expiresAt is null when disabled. */
+  remoteMode: boolean;
+  expiresAt: number | null;
 }
 
 export type ServerMessage =
   | { type: "permission"; id: string; toolName: string; toolInput: unknown; suggestions: unknown[] }
   | { type: "idle"; lastMessage: string; createdAt: number }
-  | { type: "snapshot"; pending: PendingPermission[]; recent: RecentMessage[] }
+  | ({ type: "snapshot" } & Snapshot)
+  | { type: "remote_mode"; enabled: boolean; expiresAt: number | null }
   | { type: "interrupt_ack" }
   | { type: "error"; message: string };
 
 export type ClientMessage =
   | { type: "decision"; id: string; behavior: PermissionBehavior; always?: boolean }
   | { type: "message"; text: string }
+  | { type: "remote_mode"; enabled: boolean }
   | { type: "interrupt" };
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
@@ -89,6 +94,9 @@ export function parseClientMessage(value: unknown): ClientMessage | null {
   }
   if (record.type === "message" && typeof record.text === "string" && record.text.trim()) {
     return { type: "message", text: record.text };
+  }
+  if (record.type === "remote_mode" && typeof record.enabled === "boolean") {
+    return { type: "remote_mode", enabled: record.enabled };
   }
   return record.type === "interrupt" ? { type: "interrupt" } : null;
 }

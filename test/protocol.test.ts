@@ -25,4 +25,11 @@ describe("hook protocol parsing", () => {
     expect(parseClientMessage({ type: "decision", id: "1", behavior: "allow", always: true })).toEqual({ type: "decision", id: "1", behavior: "allow", always: true });
     expect(parseClientMessage({ type: "message", text: "   " })).toBeNull();
   });
+
+  it("parses the remote mode toggle and rejects a missing flag", () => {
+    expect(parseClientMessage({ type: "remote_mode", enabled: true })).toEqual({ type: "remote_mode", enabled: true });
+    expect(parseClientMessage({ type: "remote_mode", enabled: false })).toEqual({ type: "remote_mode", enabled: false });
+    expect(parseClientMessage({ type: "remote_mode" })).toBeNull();
+    expect(parseClientMessage({ type: "remote_mode", enabled: "yes" })).toBeNull();
+  });
 });

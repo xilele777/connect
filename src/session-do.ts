@@ -138,6 +138,11 @@ export class SessionDO extends DurableObject<Env> {
       this.pendingStop.settle(message.text);
       return;
     }
+    if (message.type === "remote_mode") {
+      const state = this.writeRemoteMode(message.enabled);
+      this.broadcast({ type: "remote_mode", enabled: state.enabled, expiresAt: state.expiresAt });
+      return;
+    }
     void this.setInterrupt().then(() => this.send(socket, { type: "interrupt_ack" }));
   }
 
@@ -153,6 +158,7 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   private async waitForPermission(payload: PermissionPayload): Promise<PermissionDecision | null> {
+    const remote = this.readRemoteMode();
     const pending: PendingPermission = {
       id: crypto.randomUUID(),
       createdAt: Date.now(),
@@ -160,7 +166,7 @@ export class SessionDO extends DurableObject<Env> {
     };
     const request = new Pending<PermissionDecision>({
       timeouts: readTimeouts(this.env),
-      remoteMode: false,
+      remoteMode: remote.enabled,
       isConnected: () => this.ctx.getWebSockets().length > 0,
       onSettled: () => { this.pendingPermissions.delete(pending.id); },
     });
@@ -171,11 +177,12 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   private async waitForStop(): Promise<string | null> {
+    const remote = this.readRemoteMode();
     this.pendingStop?.settle(null);
     let stored = false;
     const request = new Pending<string>({
       timeouts: readTimeouts(this.env),
-      remoteMode: false,
+      remoteMode: remote.enabled,
       isConnected: () => this.ctx.getWebSockets().length > 0,
       onSettled: () => { if (stored) this.pendingStop = null; },
     });
@@ -198,7 +205,8 @@ export class SessionDO extends DurableObject<Env> {
     const rows = this.ctx.storage.sql.exec<{ id: number; text: string; created_at: number }>("SELECT id, text, created_at FROM recent_messages ORDER BY id DESC LIMIT ?", this.maxRecentMessages()).toArray();
     const recent: RecentMessage[] = rows.reverse().map((row) => ({ id: row.id, text: row.text, createdAt: row.created_at }));
     const pending = [...this.pendingPermissions.values()].map((item) => item.payload);
-    return { pending, recent };
+    const remote = this.readRemoteMode();
+    return { pending, recent, remoteMode: remote.enabled, expiresAt: remote.expiresAt };
   }
 
   private async sendSnapshot(socket: WebSocket): Promise<void> {
@@ -216,6 +224,30 @@ export class SessionDO extends DurableObject<Env> {
   private maxRecentMessages(): number {
     const configured = Number(this.env.MAX_RECENT_MESSAGES);
     return Number.isFinite(configured) ? Math.min(200, Math.max(1, Math.floor(configured))) : 50;
+  }
+
+  private remoteModeTtlMs(): number {
+    const configured = Number(this.env.REMOTE_MODE_TTL_MS);
+    return Number.isFinite(configured) && configured > 0
+      ? Math.min(86_400_000, Math.max(100, Math.floor(configured)))
+      : 28_800_000;
+  }
+
+  /** Lazy expiry: compare the timestamp when reading instead of scheduling a DO alarm. */
+  private readRemoteMode(): { enabled: boolean; expiresAt: number | null } {
+    const row = this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM session_state WHERE key = 'remote_mode'").toArray()[0];
+    const enabledAt = Number(row?.value ?? "0");
+    if (!Number.isFinite(enabledAt) || enabledAt <= 0) return { enabled: false, expiresAt: null };
+    const expiresAt = enabledAt + this.remoteModeTtlMs();
+    return Date.now() < expiresAt ? { enabled: true, expiresAt } : { enabled: false, expiresAt: null };
+  }
+
+  private writeRemoteMode(enabled: boolean): { enabled: boolean; expiresAt: number | null } {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO session_state (key, value) VALUES ('remote_mode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      enabled ? String(Date.now()) : "0",
+    );
+    return this.readRemoteMode();
   }
 
   private async setInterrupt(): Promise<void> {

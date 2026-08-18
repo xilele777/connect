@@ -9,6 +9,20 @@ async function post(path: string, body?: unknown): Promise<Response> {
   }));
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function connectPhone(name: string): Promise<WebSocket> {
+  const response = await env.SESSION.getByName(name).fetch(new Request("https://session.internal/ws", {
+    headers: { Upgrade: "websocket" },
+  }));
+  const socket = response.webSocket;
+  if (!socket) throw new Error("expected a websocket upgrade");
+  socket.accept();
+  return socket;
+}
+
 describe("SessionDO state machine", () => {
   it("fails open when no phone is connected", async () => {
     const response = await post("/internal/permission", { toolName: "Bash", toolInput: { command: "pwd" }, permissionSuggestions: [] });
@@ -33,5 +47,36 @@ describe("SessionDO state machine", () => {
     const response = await stub.fetch(new Request("https://session.internal/internal/snapshot"));
     const snapshot = await response.json<{ recent: Array<{ text: string }> }>();
     expect(snapshot.recent.map((item) => item.text)).toEqual(["first reply"]);
+  });
+
+  it("enables remote mode with an expiry and reports it in the snapshot", async () => {
+    const name = "remote-mode-on";
+    const socket = await connectPhone(name);
+    socket.send(JSON.stringify({ type: "remote_mode", enabled: true }));
+    await sleep(20);
+    const response = await env.SESSION.getByName(name).fetch(new Request("https://session.internal/internal/snapshot"));
+    const snapshot = await response.json<{ remoteMode: boolean; expiresAt: number | null }>();
+    expect(snapshot.remoteMode).toBe(true);
+    expect(typeof snapshot.expiresAt).toBe("number");
+    socket.close();
+  });
+
+  it("treats remote mode as off once the ttl has elapsed", async () => {
+    const name = "remote-mode-ttl";
+    const socket = await connectPhone(name);
+    socket.send(JSON.stringify({ type: "remote_mode", enabled: true }));
+    await sleep(360);
+    const response = await env.SESSION.getByName(name).fetch(new Request("https://session.internal/internal/snapshot"));
+    const snapshot = await response.json<{ remoteMode: boolean; expiresAt: number | null }>();
+    expect(snapshot.remoteMode).toBe(false);
+    expect(snapshot.expiresAt).toBeNull();
+    socket.close();
+  });
+
+  it("reports remote mode as off in a fresh session snapshot", async () => {
+    const response = await env.SESSION.getByName("remote-mode-default").fetch(new Request("https://session.internal/internal/snapshot"));
+    const snapshot = await response.json<{ remoteMode: boolean; expiresAt: number | null }>();
+    expect(snapshot.remoteMode).toBe(false);
+    expect(snapshot.expiresAt).toBeNull();
   });
 });
