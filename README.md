@@ -92,6 +92,18 @@ These live in `wrangler.jsonc` under `vars` and are all strings:
 | `REMOTE_OFFLINE_TIMEOUT_MS` | `90000` | How long a remote-mode request waits for a phone to connect |
 | `REMOTE_MODE_TTL_MS` | `28800000` | How long remote mode stays on before expiring by itself |
 
+## Connect the current session from your phone
+
+Every Claude Code session has its own URL, and the session ID changes when you start a new session (a fresh VSCode window or `/clear`). To get the URL of the session you are in right now, run:
+
+```powershell
+pwsh -NoProfile -File scripts/get-session.ps1
+```
+
+It reads the project directory from the current working directory, takes the most recently modified session file under `~/.claude/projects/<project>/`, and prints the console URL. Open that URL on the phone and enter the phone token.
+
+When you want to use the "继续指令" input on the phone, note that it only lands while the end-of-turn `Stop` hook is suspended - i.e. **after** Claude has finished its turn and while either the phone is connected or remote mode is on. If Claude is still working, or the hook already returned, the message is dropped. Keep the phone page in the foreground and, when away from the computer, turn on remote mode so the stop window stays open for `REMOTE_OFFLINE_TIMEOUT_MS`.
+
 ## Deploy
 
 ```powershell

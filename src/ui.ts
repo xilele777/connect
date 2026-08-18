@@ -30,6 +30,8 @@ export function renderConsole(sessionId: string): string {
     section { margin-top: 20px; }
     section > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; }
     .empty { border: 1px dashed var(--line); color: var(--muted); padding: 18px; text-align: center; }
+    #error-banner { display: none; margin-bottom: 16px; border: 1px solid var(--danger); background: #3d0d16; color: var(--text); padding: 10px 14px; font-size: 13px; }
+    #error-banner.show { display: block; }
     .permission, .message { border: 1px solid var(--line); background: var(--panel); padding: 14px; margin-bottom: 10px; }
     .permission { border-left: 3px solid var(--warn); }
     .permission-title { display: flex; justify-content: space-between; gap: 10px; font-weight: 650; }
@@ -58,6 +60,7 @@ export function renderConsole(sessionId: string): string {
   </main>
   <main id="app" class="hidden">
     <header><div><h1>Claude Remote Control</h1><div class="session">会话 ${safeSessionId}</div></div><div><div id="status" class="status">未连接</div><div class="actions"><button id="remote-toggle" type="button">远程模式 关</button></div></div></header>
+    <div id="error-banner" role="alert"></div>
     <section><h2>待处理权限</h2><div id="permissions"><div class="empty">暂无待处理请求</div></div></section>
     <section><h2>对话</h2><div id="messages"><div class="empty">等待 Claude 回复</div></div></section>
     <section><form id="compose" class="compose"><textarea id="message" placeholder="继续指令" aria-label="继续指令"></textarea><button class="primary" type="submit">发送</button></form><div class="actions"><button id="interrupt" class="danger" type="button">停止当前任务</button></div></section>
@@ -76,6 +79,14 @@ export function renderConsole(sessionId: string): string {
       let pending = [];
       let remoteMode = { enabled: false, expiresAt: null };
       const remoteToggle = document.getElementById('remote-toggle');
+      const errorBanner = document.getElementById('error-banner');
+      let errorTimer = null;
+      function showError(message) {
+        errorBanner.textContent = message;
+        errorBanner.classList.add('show');
+        if (errorTimer) clearTimeout(errorTimer);
+        errorTimer = setTimeout(() => errorBanner.classList.remove('show'), 5000);
+      }
       function setStatus(text, online) { status.textContent = text; status.classList.toggle('online', online); }
       function encode(value) { const bytes = new TextEncoder().encode(value); let binary = ''; bytes.forEach((b) => { binary += String.fromCharCode(b); }); return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, ''); }
       function renderRemoteMode() {
@@ -106,12 +117,12 @@ export function renderConsole(sessionId: string): string {
         const url = location.origin.replace(/^http/, 'ws') + '/ws/' + encodeURIComponent(sessionId);
         socket = new WebSocket(url, ['claude-remote-control', 'token.' + encode(token)]);
         socket.onopen = () => setStatus('已连接', true);
-        socket.onmessage = (event) => { try { const data = JSON.parse(event.data); if (data.type === 'snapshot') { pending = data.pending || []; recent = data.recent || []; remoteMode = { enabled: data.remoteMode === true, expiresAt: data.expiresAt ?? null }; render(); } else if (data.type === 'permission') { pending = pending.concat([data]); render(); } else if (data.type === 'idle') { recent = recent.concat([{ text: data.lastMessage, createdAt: data.createdAt }]).slice(-50); render(); } else if (data.type === 'remote_mode') { remoteMode = { enabled: data.enabled === true, expiresAt: data.expiresAt ?? null }; renderRemoteMode(); } } catch (_) {} };
+        socket.onmessage = (event) => { try { const data = JSON.parse(event.data); if (data.type === 'snapshot') { pending = data.pending || []; recent = data.recent || []; remoteMode = { enabled: data.remoteMode === true, expiresAt: data.expiresAt ?? null }; render(); } else if (data.type === 'permission') { pending = pending.concat([data]); render(); } else if (data.type === 'idle') { recent = recent.concat([{ text: data.lastMessage, createdAt: data.createdAt }]).slice(-50); render(); } else if (data.type === 'remote_mode') { remoteMode = { enabled: data.enabled === true, expiresAt: data.expiresAt ?? null }; renderRemoteMode(); } else if (data.type === 'error') { showError(data.message || '会话返回了错误'); } } catch (_) {} };
         socket.onclose = (event) => { setStatus('连接断开', false); if (event.code === 1008) { localStorage.removeItem(tokenKey); tokenPanel.classList.remove('hidden'); app.classList.add('hidden'); } else { setTimeout(() => { const saved = localStorage.getItem(tokenKey); if (saved) connect(saved); }, 2500); } };
         socket.onerror = () => setStatus('连接失败', false);
       }
       document.getElementById('token-form').addEventListener('submit', (event) => { event.preventDefault(); const token = document.getElementById('token').value.trim(); if (!token) return; localStorage.setItem(tokenKey, token); connect(token); });
-      document.getElementById('compose').addEventListener('submit', (event) => { event.preventDefault(); const input = document.getElementById('message'); const text = input.value.trim(); if (!text || !socket || socket.readyState !== WebSocket.OPEN) return; socket.send(JSON.stringify({ type: 'message', text })); input.value = ''; });
+      document.getElementById('compose').addEventListener('submit', (event) => { event.preventDefault(); const input = document.getElementById('message'); const text = input.value.trim(); if (!text) return; if (!socket || socket.readyState !== WebSocket.OPEN) { showError('未连接到会话，请检查网络或等待自动重连'); return; } socket.send(JSON.stringify({ type: 'message', text })); input.value = ''; });
       document.getElementById('interrupt').addEventListener('click', () => { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'interrupt' })); });
       remoteToggle.addEventListener('click', () => { if (!socket || socket.readyState !== WebSocket.OPEN) return; socket.send(JSON.stringify({ type: 'remote_mode', enabled: !remoteMode.enabled })); });
       setInterval(renderRemoteMode, 30000);
