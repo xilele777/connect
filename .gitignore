@@ -3,3 +3,5 @@ node_modules/
 .dev.vars
 worker-configuration.d.ts
 coverage/
+.playwright-mcp/
+.remote-test/
