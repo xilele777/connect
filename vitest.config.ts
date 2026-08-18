@@ -9,6 +9,9 @@ export default defineConfig({
         bindings: {
           COMPUTER_TOKEN: "test-computer-token",
           PHONE_TOKEN: "test-phone-token",
+          REQUEST_TIMEOUT_MS: "200",
+          REMOTE_OFFLINE_TIMEOUT_MS: "40",
+          REMOTE_MODE_TTL_MS: "300",
         },
       },
     }),

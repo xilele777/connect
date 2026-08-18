@@ -1,12 +1,41 @@
-const REQUEST_TIMEOUT_MS = 590_000;
+export interface PendingTimeouts {
+  /** Total wait ceiling in milliseconds. */
+  requestTimeoutMs: number;
+  /** First-stage window for a phone to connect in remote mode. */
+  remoteOfflineTimeoutMs: number;
+}
 
 export interface PendingOptions {
-  /** Maximum time to wait, in milliseconds. */
-  timeoutMs?: number;
-  /** Whether a phone is connected when the request starts. */
+  timeouts: PendingTimeouts;
+  /** Keeps the original immediate fail-open behavior when disabled. */
+  remoteMode: boolean;
+  /** Checked at construction and once more after the offline window. */
   isConnected: () => boolean;
   /** Called exactly once after the request settles. */
   onSettled?: () => void;
+}
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 590_000;
+const DEFAULT_REMOTE_OFFLINE_TIMEOUT_MS = 90_000;
+const MIN_TIMEOUT_MS = 10;
+const MAX_TIMEOUT_MS = 590_000;
+
+function readMs(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.floor(value)));
+}
+
+export function readTimeouts(env: Env): PendingTimeouts {
+  const requestTimeoutMs = readMs(env.REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS);
+  return {
+    requestTimeoutMs,
+    remoteOfflineTimeoutMs: Math.min(
+      requestTimeoutMs,
+      readMs(env.REMOTE_OFFLINE_TIMEOUT_MS, DEFAULT_REMOTE_OFFLINE_TIMEOUT_MS),
+    ),
+  };
 }
 
 export class Pending<T> {
@@ -23,14 +52,33 @@ export class Pending<T> {
       this.resolveDeferred = resolve;
     });
 
-    if (!options.isConnected()) {
+    const { timeouts, remoteMode, isConnected } = options;
+    const connected = isConnected();
+
+    if (!remoteMode && !connected) {
       this.active = false;
       this.settle(null);
       return;
     }
-
     this.active = true;
-    this.timer = setTimeout(() => this.settle(null), options.timeoutMs ?? REQUEST_TIMEOUT_MS);
+
+    if (remoteMode && !connected) {
+      this.timer = setTimeout(() => {
+        if (!isConnected()) {
+          this.settle(null);
+          return;
+        }
+        const remaining = timeouts.requestTimeoutMs - timeouts.remoteOfflineTimeoutMs;
+        if (remaining <= 0) {
+          this.settle(null);
+          return;
+        }
+        this.timer = setTimeout(() => this.settle(null), remaining);
+      }, timeouts.remoteOfflineTimeoutMs);
+      return;
+    }
+
+    this.timer = setTimeout(() => this.settle(null), timeouts.requestTimeoutMs);
   }
 
   get waiting(): boolean {

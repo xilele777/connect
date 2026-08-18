@@ -13,7 +13,10 @@
     { "tag": "v1", "new_sqlite_classes": ["SessionDO"] }
   ],
   "vars": {
-    "MAX_RECENT_MESSAGES": "50"
+    "MAX_RECENT_MESSAGES": "50",
+    "REQUEST_TIMEOUT_MS": "590000",
+    "REMOTE_OFFLINE_TIMEOUT_MS": "90000",
+    "REMOTE_MODE_TTL_MS": "28800000"
   },
   "observability": {
     "enabled": true,

@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { Pending } from "./pending";
+import { Pending, readTimeouts } from "./pending";
 import {
   asRecord,
   parseClientMessage,
@@ -159,6 +159,8 @@ export class SessionDO extends DurableObject<Env> {
       ...payload,
     };
     const request = new Pending<PermissionDecision>({
+      timeouts: readTimeouts(this.env),
+      remoteMode: false,
       isConnected: () => this.ctx.getWebSockets().length > 0,
       onSettled: () => { this.pendingPermissions.delete(pending.id); },
     });
@@ -172,6 +174,8 @@ export class SessionDO extends DurableObject<Env> {
     this.pendingStop?.settle(null);
     let stored = false;
     const request = new Pending<string>({
+      timeouts: readTimeouts(this.env),
+      remoteMode: false,
       isConnected: () => this.ctx.getWebSockets().length > 0,
       onSettled: () => { if (stored) this.pendingStop = null; },
     });
