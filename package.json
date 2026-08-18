@@ -1,0 +1,22 @@
+{
+  "name": "claude-remote-control",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types",
+    "deploy": "wrangler deploy --minify",
+    "deploy:check": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.21.3",
+    "@types/node": "^26.2.0",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10",
+    "wrangler": "4.123.0"
+  }
+}
