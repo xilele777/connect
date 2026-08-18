@@ -1854,10 +1854,26 @@ git commit -m "docs(plan): record deployment and end-to-end baseline results
 
 | 环境 | 成功数 | 失败数 | p50 (ms) | p95 (ms) | 达标 |
 |---|---|---|---|---|---|
-| direct | 待填 | 待填 | 待填 | 待填 | 待填 |
-| proxy | 待填 | 待填 | 待填 | 待填 | 待填 |
+| direct | 20 | 0 | 307.3 | 358.8 | 否 |
+| proxy `http://127.0.0.1:7890` | 20 | 0 | 412.8 | 949.2 | 否 |
 
-测量日期：待填
+测量日期：2026-08-18
+
+环境：`pwsh 7.6.5`（支持 `Invoke-WebRequest -NoProxy`，未走降级路径）。
+代理确实在运行（20/20 成功），环境变量 `HTTP_PROXY` / `HTTPS_PROXY` 均为 `http://127.0.0.1:7890`。
+Cloudflare 边缘 `colo=HKG`、`loc=CN`，出口为 IPv6。
+
+复测一次（同脚本、同参数）结果一致，非偶发抖动：
+direct p50 306.7 / p95 384.9；proxy p50 410.4 / p95 819.4，失败数均为 0。
+
+**两组 p95 均 ≥ 300 ms 判定线，按 Task 1 Step 3 情况 3 处理，待用户决定后再进入 Task 2。**
+
+补充诊断（不改变上表记录值，仅供判读）：脚本每个样本都由独立的 `Invoke-WebRequest`
+调用发出，不复用连接，因此约 300 ms 中的大部分是 TCP + TLS 握手开销，而非链路 RTT。
+同一 `HttpClient` 连续请求实测：首次 334.6 ms，其后稳定在 95～108 ms；
+裸 TCP 连接耗时 79～103 ms，即到 HKG 边缘的单程链路 RTT 约 100 ms。
+代理链路则在此基础上再叠加 ~100 ms p50 与显著更长的尾延迟（p95 819～949 ms）。
+结论：判定是否真正超标，取决于 hook 实际是否复用连接，需由 Task 9 的 R1b 端到端实测确认。
 
 **R1b 端到端（Task 9）**
 
