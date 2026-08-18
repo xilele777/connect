@@ -42,6 +42,18 @@ export function renderConsole(sessionId: string): string {
     button.primary { background: #0f766e; border-color: #14b8a6; }
     button.danger { background: #881337; border-color: #fb7185; }
     button:disabled { cursor: wait; opacity: .6; }
+    .question { margin-top: 14px; }
+    .question-header { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 4px; }
+    .question-text { font-weight: 650; margin-bottom: 8px; }
+    .options { display: flex; flex-direction: column; gap: 8px; }
+    .option { width: 100%; text-align: left; justify-content: flex-start; border-radius: 6px; }
+    label.option { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; border: 1px solid var(--line); background: #21262d; padding: 8px 12px; }
+    label.option:has(input:checked) { border-color: var(--accent); background: #0f2422; }
+    .option-desc { width: 100%; color: var(--muted); font-size: 12px; margin: 0; padding-left: 24px; }
+    label.option .option-desc { padding-left: 0; }
+    .other { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+    .other input { flex: 1; padding: 8px 10px; }
+    .other button { flex: none; }
     form.compose { display: flex; gap: 8px; align-items: stretch; }
     textarea, input { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #0d1117; color: var(--text); padding: 10px; font: inherit; }
     textarea { min-height: 78px; resize: vertical; }
@@ -100,18 +112,85 @@ export function renderConsole(sessionId: string): string {
         if (!pending.length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = '暂无待处理请求'; permissions.append(empty); }
         pending.forEach((item) => {
           const card = document.createElement('article'); card.className = 'permission';
-          const title = document.createElement('div'); title.className = 'permission-title'; title.textContent = item.toolName;
-          const body = document.createElement('pre'); body.textContent = JSON.stringify(item.toolInput, null, 2);
           const actions = document.createElement('div'); actions.className = 'actions';
-          [['allow', '允许', 'primary'], ['allow-always', '总是允许这类', 'primary'], ['deny', '拒绝', 'danger']].forEach(([mode, label, style]) => { const button = document.createElement('button'); button.type = 'button'; button.textContent = label; button.className = style; button.onclick = () => decide(item.id, mode); actions.append(button); });
-          card.append(title, body, actions); permissions.append(card);
+          if (item.questions && item.questions.length) {
+            card.classList.add('question-card');
+            const title = document.createElement('div'); title.className = 'permission-title'; title.textContent = 'Claude 在询问';
+            card.append(title);
+            item.questions.forEach((q) => {
+              const qel = document.createElement('div'); qel.className = 'question';
+              if (q.header) { const h = document.createElement('div'); h.className = 'question-header'; h.textContent = q.header; qel.append(h); }
+              const text = document.createElement('div'); text.className = 'question-text'; text.textContent = q.question; qel.append(text);
+              const opts = document.createElement('div'); opts.className = 'options';
+              if (q.multiSelect) {
+                q.options.forEach((opt) => {
+                  const label = document.createElement('label'); label.className = 'option';
+                  const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = opt.label;
+                  label.append(cb);
+                  const span = document.createElement('span'); span.textContent = opt.label; label.append(span);
+                  if (opt.description) { const d = document.createElement('div'); d.className = 'option-desc'; d.textContent = opt.description; label.append(d); }
+                  opts.append(label);
+                });
+              } else {
+                q.options.forEach((opt) => {
+                  const button = document.createElement('button'); button.type = 'button'; button.className = 'option';
+                  const span = document.createElement('span'); span.textContent = opt.label; button.append(span);
+                  if (opt.description) { const d = document.createElement('div'); d.className = 'option-desc'; d.textContent = opt.description; button.append(d); }
+                  button.onclick = () => { button.disabled = true; decide(item.id, 'allow', { [q.question]: opt.label }); };
+                  opts.append(button);
+                });
+              }
+              qel.append(opts);
+              const other = document.createElement('div'); other.className = 'other';
+              const otherInput = document.createElement('input'); otherInput.type = 'text'; otherInput.placeholder = '其他（自定义回答）';
+              other.append(otherInput);
+              if (!q.multiSelect) {
+                const useBtn = document.createElement('button'); useBtn.type = 'button'; useBtn.textContent = '提交';
+                useBtn.onclick = () => {
+                  const value = otherInput.value.trim();
+                  if (!value) { showError('请输入自定义回答'); return; }
+                  useBtn.disabled = true;
+                  decide(item.id, 'allow', { [q.question]: value });
+                };
+                other.append(useBtn);
+              }
+              qel.append(other);
+              card.append(qel);
+            });
+            if (item.questions.some((q) => q.multiSelect)) {
+              const submit = document.createElement('button'); submit.type = 'button'; submit.className = 'primary'; submit.textContent = '提交答案';
+              submit.onclick = () => {
+                const answers = {};
+                item.questions.forEach((q, qi) => {
+                  if (!q.multiSelect) return;
+                  const qel = card.querySelectorAll('.question')[qi];
+                  const checked = [...qel.querySelectorAll('input[type=checkbox]:checked')].map((cb) => cb.value);
+                  const otherText = (qel.querySelector('.other input')?.value ?? '').trim();
+                  const picked = [...checked, ...(otherText ? [otherText] : [])];
+                  if (picked.length) answers[q.question] = picked.join(', ');
+                });
+                if (!Object.keys(answers).length) { showError('请至少选择一个选项或填写其他'); return; }
+                submit.disabled = true; decide(item.id, 'allow', answers);
+              };
+              actions.append(submit);
+            }
+            const deny = document.createElement('button'); deny.type = 'button'; deny.className = 'danger'; deny.textContent = '拒绝';
+            deny.onclick = () => decide(item.id, 'deny');
+            actions.append(deny);
+          } else {
+            const title = document.createElement('div'); title.className = 'permission-title'; title.textContent = item.toolName;
+            const body = document.createElement('pre'); body.textContent = JSON.stringify(item.toolInput, null, 2);
+            [['allow', '允许', 'primary'], ['allow-always', '总是允许这类', 'primary'], ['deny', '拒绝', 'danger']].forEach(([mode, label, style]) => { const button = document.createElement('button'); button.type = 'button'; button.textContent = label; button.className = style; button.onclick = () => decide(item.id, mode); actions.append(button); });
+            card.append(title, body);
+          }
+          card.append(actions); permissions.append(card);
         });
         messages.replaceChildren();
         if (!recent.length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = '等待 Claude 回复'; messages.append(empty); }
         recent.forEach((item) => { const message = document.createElement('article'); message.className = 'message'; message.textContent = item.text; messages.append(message); });
         renderRemoteMode();
       }
-      function decide(id, mode) { if (!socket || socket.readyState !== WebSocket.OPEN) return; socket.send(JSON.stringify({ type: 'decision', id, behavior: mode === 'deny' ? 'deny' : 'allow', always: mode === 'allow-always' })); pending = pending.filter((item) => item.id !== id); render(); }
+      function decide(id, mode, answers) { if (!socket || socket.readyState !== WebSocket.OPEN) return; socket.send(JSON.stringify({ type: 'decision', id, behavior: mode === 'deny' ? 'deny' : 'allow', always: mode === 'allow-always', ...(answers ? { answers } : {}) })); pending = pending.filter((item) => item.id !== id); render(); }
       function connect(token) {
         app.classList.remove('hidden'); tokenPanel.classList.add('hidden'); setStatus('连接中', false);
         const url = location.origin.replace(/^http/, 'ws') + '/ws/' + encodeURIComponent(sessionId);

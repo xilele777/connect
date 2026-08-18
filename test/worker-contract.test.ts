@@ -20,4 +20,19 @@ describe("Worker hook contract", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("");
   });
+
+  it("fails open for AskUserQuestion when no phone is connected", async () => {
+    const response = await SELF.fetch("https://remote.test/hook/permission", {
+      method: "POST",
+      headers: { Authorization: "Bearer test-computer-token" },
+      body: JSON.stringify({
+        session_id: "contract",
+        tool_name: "AskUserQuestion",
+        tool_input: { questions: [{ question: "Pick", options: [{ label: "A" }] }] },
+        permission_suggestions: [],
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("");
+  });
 });

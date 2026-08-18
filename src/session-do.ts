@@ -4,6 +4,7 @@ import { Pending, readTimeouts } from "./pending";
 import {
   asRecord,
   parseClientMessage,
+  parseQuestions,
   type ClientMessage,
   type PendingPermission,
   type PermissionDecision,
@@ -127,8 +128,9 @@ export class SessionDO extends DurableObject<Env> {
         return;
       }
       const decision: PermissionDecision = {
-        behavior: message.behavior,
+        behavior: message.answers ? "allow" : message.behavior,
         ...(message.always && message.behavior === "allow" ? { updatedPermissions: pending.payload.permissionSuggestions } : {}),
+        ...(message.answers ? { updatedInput: buildUpdatedInput(pending.payload, message.answers) } : {}),
       };
       pending.request.settle(decision);
       return;
@@ -172,10 +174,12 @@ export class SessionDO extends DurableObject<Env> {
 
   private async waitForPermission(payload: PermissionPayload, clickUrl: string): Promise<PermissionDecision | null> {
     const remote = this.readRemoteMode();
+    const questions = parseQuestions(payload.toolInput);
     const pending: PendingPermission = {
       id: crypto.randomUUID(),
       createdAt: Date.now(),
       ...payload,
+      ...(questions ? { questions } : {}),
     };
     const request = new Pending<PermissionDecision>({
       timeouts: readTimeouts(this.env),
@@ -185,7 +189,14 @@ export class SessionDO extends DurableObject<Env> {
     });
     if (!request.waiting) return null;
     this.pendingPermissions.set(pending.id, { payload: pending, request });
-    this.broadcast({ type: "permission", id: pending.id, toolName: pending.toolName, toolInput: pending.toolInput, suggestions: pending.permissionSuggestions });
+    this.broadcast({
+      type: "permission",
+      id: pending.id,
+      toolName: pending.toolName,
+      toolInput: pending.toolInput,
+      suggestions: pending.permissionSuggestions,
+      ...(pending.questions ? { questions: pending.questions } : {}),
+    });
     if (remote.enabled) void this.notifier.notify(permissionNotification(pending.toolName, clickUrl));
     return request.promise;
   }
@@ -279,4 +290,11 @@ export class SessionDO extends DurableObject<Env> {
 
 function jsonResponse(value: unknown, status = 200): Response {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
+}
+
+/** Echoes the original questions back and attaches the phone's picks so Claude Code skips its local prompt. */
+function buildUpdatedInput(payload: PendingPermission, answers: Record<string, string>): unknown {
+  const record = asRecord(payload.toolInput);
+  const questions = Array.isArray(record?.questions) ? record.questions : undefined;
+  return questions ? { questions, answers } : { answers };
 }

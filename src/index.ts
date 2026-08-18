@@ -127,10 +127,12 @@ async function readJson(request: Request): Promise<unknown | null> {
   try { return await request.json<unknown>(); } catch { return null; }
 }
 
-function isPermissionDecision(value: unknown): value is { behavior: "allow" | "deny"; updatedPermissions?: unknown[] } {
+function isPermissionDecision(value: unknown): value is { behavior: "allow" | "deny"; updatedPermissions?: unknown[]; updatedInput?: unknown } {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  return (record.behavior === "allow" || record.behavior === "deny") && (record.updatedPermissions === undefined || Array.isArray(record.updatedPermissions));
+  return (record.behavior === "allow" || record.behavior === "deny")
+    && (record.updatedPermissions === undefined || Array.isArray(record.updatedPermissions))
+    && (record.updatedInput === undefined || (typeof record.updatedInput === "object" && record.updatedInput !== null));
 }
 
 function isStopDecision(value: unknown): value is { text: string } {

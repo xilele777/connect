@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseClientMessage,
   parsePermissionHook,
+  parseQuestions,
   parseSessionId,
   parseStopHook,
 } from "../src/protocol";
@@ -31,5 +32,54 @@ describe("hook protocol parsing", () => {
     expect(parseClientMessage({ type: "remote_mode", enabled: false })).toEqual({ type: "remote_mode", enabled: false });
     expect(parseClientMessage({ type: "remote_mode" })).toBeNull();
     expect(parseClientMessage({ type: "remote_mode", enabled: "yes" })).toBeNull();
+  });
+});
+
+describe("AskUserQuestion questions parsing", () => {
+  it("extracts structured questions with options, headers, and multiSelect", () => {
+    const toolInput = {
+      questions: [
+        {
+          question: "How should I format the output?",
+          header: "Format",
+          options: [
+            { label: "Summary", description: "Brief overview" },
+            { label: "Detailed", description: "Full explanation" },
+          ],
+          multiSelect: false,
+        },
+      ],
+    };
+    expect(parseQuestions(toolInput)).toEqual([
+      { question: "How should I format the output?", header: "Format", options: [{ label: "Summary", description: "Brief overview" }, { label: "Detailed", description: "Full explanation" }], multiSelect: false },
+    ]);
+  });
+
+  it("defaults multiSelect to false when the flag is missing", () => {
+    const toolInput = { questions: [{ question: "Pick one", options: [{ label: "A" }] }] };
+    expect(parseQuestions(toolInput)).toEqual([{ question: "Pick one", options: [{ label: "A" }], multiSelect: false }]);
+  });
+
+  it("returns null for non-question tool input and malformed shapes", () => {
+    expect(parseQuestions({ command: "ls" })).toBeNull();
+    expect(parseQuestions(null)).toBeNull();
+    expect(parseQuestions({ questions: [] })).toBeNull();
+    expect(parseQuestions({ questions: [{ question: "missing options" }] })).toBeNull();
+    expect(parseQuestions({ questions: [{ question: "", options: [{ label: "A" }] }] })).toBeNull();
+  });
+
+  it("parses a decision that carries phone answers", () => {
+    expect(parseClientMessage({ type: "decision", id: "1", behavior: "allow", answers: { "How should I format the output?": "Summary" } })).toEqual({
+      type: "decision",
+      id: "1",
+      behavior: "allow",
+      always: false,
+      answers: { "How should I format the output?": "Summary" },
+    });
+  });
+
+  it("rejects a decision that carries malformed answers instead of mis-approving the tool", () => {
+    expect(parseClientMessage({ type: "decision", id: "1", behavior: "allow", answers: {} })).toBeNull();
+    expect(parseClientMessage({ type: "decision", id: "1", behavior: "allow", answers: { q: 42 } })).toBeNull();
   });
 });

@@ -56,7 +56,8 @@ export function createNotifier(env: Env): Notifier {
 
 /** 权限请求推送只接收工具名，tool_input 原文没有进入这里的途径。 */
 export function permissionNotification(toolName: string, clickUrl: string): Notification {
-  return { title: "Claude 等待批准", body: toolName, clickUrl };
+  const isQuestion = toolName === "AskUserQuestion";
+  return { title: isQuestion ? "Claude 在询问问题" : "Claude 等待批准", body: toolName, clickUrl };
 }
 
 /** Stop 推送正文固定，Claude 回复文本没有进入这里的途径。 */

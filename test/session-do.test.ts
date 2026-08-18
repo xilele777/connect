@@ -23,6 +23,20 @@ async function connectPhone(name: string): Promise<WebSocket> {
   return socket;
 }
 
+function waitForMessage(socket: WebSocket, predicate?: (message: unknown) => boolean): Promise<unknown> {
+  return new Promise((resolve) => {
+    const handler = (event: MessageEvent) => {
+      let data: unknown;
+      try { data = JSON.parse(String(event.data)); } catch { return; }
+      if (!predicate || predicate(data)) {
+        socket.removeEventListener("message", handler);
+        resolve(data);
+      }
+    };
+    socket.addEventListener("message", handler);
+  });
+}
+
 describe("SessionDO state machine", () => {
   it("fails open when no phone is connected", async () => {
     const response = await post("/internal/permission", { toolName: "Bash", toolInput: { command: "pwd" }, permissionSuggestions: [] });
@@ -106,5 +120,62 @@ describe("SessionDO state machine", () => {
     }));
     expect(Date.now() - started).toBeGreaterThanOrEqual(30);
     expect(await response.json()).toEqual({ ok: false });
+  });
+});
+
+describe("SessionDO AskUserQuestion decisions", () => {
+  it("returns allow with updatedInput answers when the phone answers a question", async () => {
+    const name = "question-decision";
+    const socket = await connectPhone(name);
+    socket.send(JSON.stringify({ type: "remote_mode", enabled: true }));
+    await sleep(20);
+
+    const questions = [{ question: "Pick one", options: [{ label: "A" }, { label: "B" }], multiSelect: false }];
+    const permissionPromise = env.SESSION.getByName(name).fetch(new Request("https://session.internal/internal/permission", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        toolName: "AskUserQuestion",
+        toolInput: { questions },
+        permissionSuggestions: [],
+        origin: "https://worker.test",
+        sessionId: name,
+      }),
+    }));
+
+    const broadcast = (await waitForMessage(socket, (m) => (m as { type?: string }).type === "permission")) as { id: string; questions: unknown };
+    expect(broadcast.questions).toEqual(questions);
+
+    socket.send(JSON.stringify({ type: "decision", id: broadcast.id, behavior: "allow", answers: { "Pick one": "A" } }));
+
+    const response = await permissionPromise;
+    expect(await response.json<unknown>()).toEqual({ behavior: "allow", updatedInput: { questions, answers: { "Pick one": "A" } } });
+    socket.close();
+  });
+
+  it("keeps plain permission decisions free of updatedInput", async () => {
+    const name = "plain-decision";
+    const socket = await connectPhone(name);
+    socket.send(JSON.stringify({ type: "remote_mode", enabled: true }));
+    await sleep(20);
+
+    const permissionPromise = env.SESSION.getByName(name).fetch(new Request("https://session.internal/internal/permission", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        toolName: "Bash",
+        toolInput: { command: "pwd" },
+        permissionSuggestions: [],
+        origin: "https://worker.test",
+        sessionId: name,
+      }),
+    }));
+
+    const broadcast = (await waitForMessage(socket, (m) => (m as { type?: string }).type === "permission")) as { id: string };
+    socket.send(JSON.stringify({ type: "decision", id: broadcast.id, behavior: "allow" }));
+
+    const response = await permissionPromise;
+    expect(await response.json<unknown>()).toEqual({ behavior: "allow" });
+    socket.close();
   });
 });
