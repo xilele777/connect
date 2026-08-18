@@ -1330,9 +1330,63 @@ DO 收到的 `request.url` 是内部地址 `https://session.internal`，推导�
 - Consumes: Task 6 的 `createNotifier` / `permissionNotification` / `stopNotification` / `consoleUrl`，Task 4 的 `readRemoteMode`
 - Produces: `/internal/permission` 与 `/internal/stop` 的请求体新增两个可选字段 `origin: string` 与 `sessionId: string`
 
-- [ ] **Step 1: 写守护测试**
+- [ ] **Step 1: 先尝试用 fetchMock 覆盖推送发出这一环**
 
-> **这两项是守护测试，不是红绿循环。** 它们在改代码前后都应该通过，作用是锁住「新增的请求体字段不会把请求打成 400」和「接线之后远程模式的 fail-open 语义没被破坏」这两条。推送本身没有可在测试里断言的钩子：DO 内部构造 notifier，测试环境未配 `NTFY_TOPIC` 因而走 `NullNotifier`，不会产生任何真实网络请求。推送内容的正确性由 Task 6 对纯函数 `permissionNotification` / `stopNotification` / `consoleUrl` 的单测保证，端到端闭环由 Task 9 Step 6 人工验证。
+推送本身缺自动化覆盖：DO 内部自己构造 notifier，测试环境未配 `NTFY_TOPIC` 就走 `NullNotifier`，断不到。先花一小步试试 `cloudflare:test` 的 `fetchMock` 能否拦截 **DO 内部发起**的出站请求。**这是一次有上限的尝试，不是必须成功的步骤。**
+
+在 `vitest.config.ts` 的 `miniflare.bindings` 里临时加 `NTFY_TOPIC: "test-topic"`，然后新建 `test/notify-wiring.test.ts`：
+
+```ts
+import { env, fetchMock } from "cloudflare:test";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+
+beforeAll(() => {
+  fetchMock.activate();
+  fetchMock.disableNetConnect();
+});
+afterEach(() => fetchMock.assertNoPendingInterceptors());
+
+describe("push wiring", () => {
+  it("publishes to ntfy when a permission request suspends in remote mode", async () => {
+    const name = "push-wiring";
+    const bodies: string[] = [];
+    fetchMock.get("https://ntfy.sh").intercept({ path: "/", method: "POST", body: (raw) => { bodies.push(raw); return true; } }).reply(200, "");
+
+    const response = await env.SESSION.getByName(name).fetch(new Request("https://session.internal/ws", { headers: { Upgrade: "websocket" } }));
+    const socket = response.webSocket!;
+    socket.accept();
+    socket.send(JSON.stringify({ type: "remote_mode", enabled: true }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    socket.close();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    await env.SESSION.getByName(name).fetch(new Request("https://session.internal/internal/permission", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ toolName: "Bash", toolInput: { command: "rm -rf /" }, permissionSuggestions: [], origin: "https://worker.test", sessionId: name }),
+    }));
+
+    expect(bodies).toHaveLength(1);
+    const published = JSON.parse(bodies[0]);
+    expect(published.title).toBe("Claude 等待批准");
+    expect(published.message).toBe("Bash");
+    expect(published.click).toBe("https://worker.test/s/push-wiring");
+    // 最要紧的一条：tool_input 绝不能出现在推送里
+    expect(bodies[0]).not.toContain("rm -rf");
+  });
+});
+```
+
+跑 `npm test -- test/notify-wiring.test.ts`。两种结果：
+
+- **拦截成功**（断言通过或只差细节）→ 留下这个测试，它覆盖了推送发出、内容正确、`tool_input` 不泄漏三件事。把 `NTFY_TOPIC: "test-topic"` 正式留在 `vitest.config.ts`，并在 Step 5 的计数里加上这一项。
+- **拦截不到 DO 内部发起的 fetch**（`bodies` 为空，或报 net connect 被禁而测试挂掉）→ **删掉这个测试文件，并撤销 `vitest.config.ts` 里的 `NTFY_TOPIC`**，改走下面的 Step 2 守护测试。不要在这上面反复试超过两次，也不要为它改生产代码留接缝。
+
+无论哪种结果，都在实现报告里写清楚实际发生了什么。
+
+- [ ] **Step 2: 写守护测试**
+
+> **这两项是守护测试，不是红绿循环。** 它们在改代码前后都应该通过，作用是锁住「新增的请求体字段不会把请求打成 400」和「接线之后远程模式的 fail-open 语义没被破坏」这两条。推送内容的正确性由 Task 6 对纯函数 `permissionNotification` / `stopNotification` / `consoleUrl` 的单测保证，端到端闭环由 Task 9 Step 6 人工验证；Step 1 若成功则额外多一层自动化覆盖。
 
 在 `test/session-do.test.ts` 追加：
 
@@ -1369,7 +1423,7 @@ DO 收到的 `request.url` 是内部地址 `https://session.internal`，推导�
 
 第二项测试同时验证了三件事：远程模式开着时确实进入了挂起、走的是短窗口而不是总上限、短窗口到期后仍然 fail-open。
 
-- [ ] **Step 2: 运行测试确认当前行为**
+- [ ] **Step 3: 运行测试确认当前行为**
 
 ```bash
 npm test -- test/session-do.test.ts
@@ -1377,7 +1431,7 @@ npm test -- test/session-do.test.ts
 
 预期：两项都 PASS。若第二项失败，最可能的原因是 `socket.close()` 之后 DO 里仍留着 hibernated socket，导致 `getWebSockets().length` 没归零、走了「已连接」分支。把两处 `await sleep(20)` 加大到 100 ms 再看。
 
-- [ ] **Step 3: 改 `src/index.ts` 传入 origin 与 sessionId**
+- [ ] **Step 4: 改 `src/index.ts` 传入 origin 与 sessionId**
 
 `permissionHook` 里的 `stub.fetch` body 改为：
 
@@ -1401,7 +1455,7 @@ npm test -- test/session-do.test.ts
       }),
 ```
 
-- [ ] **Step 4: 改 `src/session-do.ts` 触发推送**
+- [ ] **Step 5: 改 `src/session-do.ts` 触发推送**
 
 顶部加导入：
 
@@ -1433,9 +1487,16 @@ import { consoleUrl, createNotifier, permissionNotification, stopNotification, t
   }
 ```
 
-把 `readPayload` 替换为同时解析 clickUrl 的版本：
+把 `readPayload` 替换为同时解析 clickUrl 的版本，并把 origin / sessionId 的解析抽成一个私有方法，避免在 `/internal/stop` 分支里重复同一段：
 
 ```ts
+  private clickUrlFrom(record: Record<string, unknown>): string {
+    return consoleUrl(
+      typeof record.origin === "string" ? record.origin : "",
+      typeof record.sessionId === "string" ? record.sessionId : "",
+    );
+  }
+
   private async readPermissionRequest(request: Request): Promise<{ payload: PermissionPayload; clickUrl: string } | null> {
     const body = await request.json<unknown>();
     const record = asRecord(body);
@@ -1446,10 +1507,7 @@ import { consoleUrl, createNotifier, permissionNotification, stopNotification, t
         toolInput: record.toolInput ?? null,
         permissionSuggestions: record.permissionSuggestions,
       },
-      clickUrl: consoleUrl(
-        typeof record.origin === "string" ? record.origin : "",
-        typeof record.sessionId === "string" ? record.sessionId : "",
-      ),
+      clickUrl: this.clickUrlFrom(record),
     };
   }
 ```
@@ -1467,10 +1525,7 @@ import { consoleUrl, createNotifier, permissionNotification, stopNotification, t
         const body = await request.json<unknown>();
         const record = asRecord(body);
         if (!record || typeof record.lastMessage !== "string") return jsonResponse({ ok: false }, 400);
-        const clickUrl = consoleUrl(
-          typeof record.origin === "string" ? record.origin : "",
-          typeof record.sessionId === "string" ? record.sessionId : "",
-        );
+        const clickUrl = this.clickUrlFrom(record);
         await this.recordMessage(record.lastMessage);
         const text = await this.waitForStop(clickUrl);
         return text ? jsonResponse({ text }) : jsonResponse({ ok: false });
@@ -1529,15 +1584,15 @@ import { consoleUrl, createNotifier, permissionNotification, stopNotification, t
   }
 ```
 
-- [ ] **Step 5: 运行测试确认通过**
+- [ ] **Step 6: 运行测试确认通过**
 
 ```bash
 npm run typecheck && npm test
 ```
 
-预期：typecheck 退出码 0；测试 32 项全绿。
+预期：typecheck 退出码 0；测试 32 项全绿（Step 1 的 fetchMock 尝试若成功则为 33 项）。
 
-- [ ] **Step 6: 确认部署产物仍能构建**
+- [ ] **Step 7: 确认部署产物仍能构建**
 
 ```bash
 npm run deploy:check
@@ -1545,7 +1600,7 @@ npm run deploy:check
 
 预期：退出码 0。
 
-- [ ] **Step 7: 提交**
+- [ ] **Step 8: 提交**
 
 ```bash
 git add src/index.ts src/session-do.ts test/session-do.test.ts
