@@ -60,6 +60,38 @@ Add the following to `~/.claude/settings.json`, preserving any existing hooks. T
 
 Claude Code's HTTP hook supports environment interpolation in headers when the variable is listed in `allowedEnvVars`; the example uses that mechanism so the computer token never appears in `settings.json`.
 
+## Remote mode
+
+Remote mode is **off by default**, and while it is off the system behaves exactly as it did before: if no phone is connected, hook requests return immediately and you get the normal local prompt with zero added latency.
+
+Turn it on from the toggle in the top-right of the phone console when you are away from the computer. While it is on:
+
+- Every suspended permission request and every end-of-turn `Stop` sends an ntfy push.
+- If no phone is connected, the request waits `REMOTE_OFFLINE_TIMEOUT_MS` (90 s by default) for one to connect. If one does, it waits up to the 590 s total; if not, it fails open.
+- The mode expires on its own after `REMOTE_MODE_TTL_MS` (8 hours by default), so forgetting to switch it off costs you at most one night.
+
+Pushes deliberately carry no `tool_input` and no reply text - only the tool name, or fixed copy for `Stop`. You have to open the token-protected console to see anything else.
+
+### ntfy setup
+
+Install the [ntfy](https://ntfy.sh/) app, subscribe to a topic that nobody else could guess, then:
+
+```powershell
+wrangler secret put NTFY_TOPIC
+```
+
+The topic name is itself a credential: anyone who knows it can read every notification you send. Never put it in `wrangler.jsonc`.
+
+### Tunables
+
+These live in `wrangler.jsonc` under `vars` and are all strings:
+
+| Var | Default | Purpose |
+|---|---|---|
+| `REQUEST_TIMEOUT_MS` | `590000` | Total suspension ceiling, inside the hook's 600 s limit |
+| `REMOTE_OFFLINE_TIMEOUT_MS` | `90000` | How long a remote-mode request waits for a phone to connect |
+| `REMOTE_MODE_TTL_MS` | `28800000` | How long remote mode stays on before expiring by itself |
+
 ## Deploy
 
 ```powershell
@@ -69,6 +101,7 @@ npm test
 npm run deploy:check
 wrangler secret put COMPUTER_TOKEN
 wrangler secret put PHONE_TOKEN
+wrangler secret put NTFY_TOPIC
 npm run deploy
 ```
 
