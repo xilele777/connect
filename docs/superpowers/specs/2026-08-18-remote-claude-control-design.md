@@ -19,13 +19,14 @@
 
 1. 手机上批准或拒绝权限请求，支持「总是允许这类」
 2. 手机上向正在运行的会话发送新指令
-3. 手机上看到 Claude 的回复与工具活动
-4. 手机上叫停正在跑的任务
+3. 手机上看到 Claude 每回合的完整回复
+4. 手机上叫停正在跑的长命令
 5. 人在电脑前时，整套机制零感知、零额外延迟
 
 ### 非目标
 
-- 不做 Claude 输出的流式逐行同步（MVP 阶段一次性推送完整回复）
+- 不做 Claude 输出的流式逐行同步（一次性推送每回合的完整回复）
+- **不做工具活动流**。手机端只看到「Claude 说了什么」，不看「Claude 正在跑什么」。该功能需在每次工具调用上挂 hook，进程 fork 频率与其观察价值不成正比
 - 不做多用户、多设备协同，单人单设备
 - 不替代 VS Code 的完整交互（如文件 diff 审阅），只覆盖上述四项基础操作
 
@@ -39,9 +40,10 @@ VS Code (Claude Code)          Cloudflare                    手机浏览器
       │                            (每会话                        │
       │   ◄──── 返回 decision ───── 一个实例) ◄─── y/n/指令 ───── │
       │                              │                            │
-      ├─ Stop ─────────POST──────►   │                            │
-      └─ PostToolUse ──POST──────►   │──── ntfy / 企业微信 ─────► 手机通知
-         (asyncRewake，不阻塞)       │  活动上报 + 取回中断标志
+      ├─ Stop ─────────POST──────►   │──── ntfy / 企业微信 ─────► 手机通知
+      │   (同步阻塞 600s)            │                            │
+      └─ PostToolUse ──POST──────►   │                            │
+         (仅 Bash，asyncRewake)      │   响应体带回中断标志       │
 ```
 
 三个组件，边界清晰：
@@ -64,11 +66,11 @@ VS Code (Claude Code)          Cloudflare                    手机浏览器
 |---|---|---|---|---|
 | 批准命令 | `PermissionRequest` | `http`，`timeout: 600` | 同步 | 仅在需要弹窗时 |
 | 发送指令 | `Stop` | `http`，`timeout: 600` | 同步 | 每回合末尾一次 |
-| 活动推送 + 中断 | `PostToolUse` | `command`，`asyncRewake: true` | 否 | 每次工具调用 |
+| 中断 | `PostToolUse` | `command`，`asyncRewake: true`，`if: "Bash(*)"` | 否 | 每次 Bash 调用 |
 
-活动推送与中断检查合并为同一个 hook：一次 POST 既上报刚完成的工具调用，又在响应里取回中断标志。`asyncRewake` 隐含 `async`，因此后台执行不阻塞。合并省掉一次进程启动与一次网络往返。
+只有三个 hook。中断用 `if` 字段限定为 `Bash`：需要叫停的场景实质上都是「正在跑一个长命令」，`Edit`、`Write`、`Read`、`Grep` 这类瞬时完成的工具查中断没有意义，跳过它们能把进程 fork 频率降低一个数量级。其请求体只含 `session_id`，不携带工具输入。
 
-`PermissionRequest` 与 `Stop` 是仅有的两个同步 hook。它们触发的时刻本来就要停下来等人（等你点弹窗、等你打字），因此一次约 200ms 的网络往返占比为零。推送与中断都在后台执行，不阻塞。
+`PermissionRequest` 与 `Stop` 是仅有的两个同步 hook。它们触发的时刻本来就要停下来等人（等你点弹窗、等你打字），因此一次约 200ms 的网络往返占比为零。中断在后台执行，不阻塞。
 
 刻意不使用同步 `PreToolUse` 做中断检查：它每次工具调用都触发，同步化会给正常使用叠加 `200ms × N` 的延迟。
 
@@ -97,28 +99,16 @@ VS Code (Claude Code)          Cloudflare                    手机浏览器
 
 Claude 将 `reason` 作为继续工作的理由，效果等同于用户发了一条新消息。
 
+这也是手机端唯一的内容来源：不做工具活动流后，手机上看到的是一条条「Claude 本回合说了什么」，与在电脑前读到的最终回复一致。
+
 ### 3.4 中断
 
-`PostToolUse` 上挂一个 `asyncRewake: true` 的 command hook，后台上报工具活动并在响应中取回中断标志：
+`PostToolUse` 上挂一个 `asyncRewake: true` 的 command hook，仅在 Bash 调用后触发，后台查询 DO 的中断标志：
 
 - 无中断：`exit 0`，无任何影响
 - 有中断：`exit 2`，stderr 写入「用户从手机请求停止当前任务」，Claude Code 唤醒 Claude 并把该文本作为 system reminder 传入，Claude 主动停止
 
-这是软中断而非强制终止。换来的是正常使用时零延迟。延迟为「到下一次工具调用」，通常在数秒内。
-
-### 3.5 认证
-
-HTTP hook 支持 `headers` 与 `allowedEnvVars`，token 从环境变量读取，不落入 settings.json 明文：
-
-```json
-{
-  "type": "http",
-  "url": "https://<worker>/hook/permission",
-  "timeout": 600,
-  "headers": { "Authorization": "Bearer $CLAUDE_CONNECT_TOKEN" },
-  "allowedEnvVars": ["CLAUDE_CONNECT_TOKEN"]
-}
-```
+这是软中断而非强制终止。换来的是正常使用时零延迟。延迟为「到下一次 Bash 调用」。
 
 ## 4. 云侧：Worker 与 SessionDO
 
@@ -128,7 +118,7 @@ HTTP hook 支持 `headers` 与 `allowedEnvVars`，token 从环境变量读取，
 |---|---|---|---|
 | `/hook/permission` | POST | 电脑 | 挂起直至手机决策或超时 |
 | `/hook/stop` | POST | 电脑 | 挂起直至手机输入或超时 |
-| `/hook/activity` | POST | 电脑 | 立即返回。广播工具活动，响应体带回中断标志 |
+| `/hook/interrupt` | POST | 电脑 | 立即返回中断标志并清除 |
 | `/s/<sessionId>` | GET | 手机 | 返回单页 HTML 控制台 |
 | `/ws/<sessionId>` | GET | 手机 | WebSocket 升级 |
 
@@ -142,11 +132,11 @@ Worker 只做鉴权与路由，按 `session_id` 定位 DO 实例，全部状态�
 pendingPermissions: Map<requestId, { resolve, payload, createdAt }>
 pendingStop:        { resolve, payload } | null
 interruptFlag:      boolean
-sockets:            Set<WebSocket>     // 手机连接，用 Hibernation API
-recentActivity:     RingBuffer<Event>  // 供重连时补齐，容量固定
+sockets:            Set<WebSocket>       // 手机连接，用 Hibernation API
+recentMessages:     RingBuffer<Message>  // Claude 的历史回复，供重连补齐，容量固定
 ```
 
-`recentActivity` 是有界环形缓冲，防止长会话内存增长。
+`recentMessages` 是有界环形缓冲，防止长会话内存增长。只存 Claude 的回合回复文本，不存工具调用记录。
 
 ### 4.3 协议
 
@@ -156,7 +146,6 @@ recentActivity:     RingBuffer<Event>  // 供重连时补齐，容量固定
 { "type": "permission", "id": "...", "toolName": "Bash",
   "toolInput": {...}, "suggestions": [...] }
 { "type": "idle", "lastMessage": "..." }
-{ "type": "activity", "toolName": "Edit", "summary": "..." }
 { "type": "snapshot", "pending": [...], "recent": [...] }
 ```
 
@@ -188,7 +177,10 @@ ntfy.sh 公共实例上通知内容为明文，因此**推送正文只含最小�
 
 Worker 直接托管的单文件 HTML，手机浏览器打开即用，无需在 Termux 中安装任何依赖。命令行操作可用 `curl` 调同一套 API 作为备份。
 
-界面三区：待决权限请求（含完整 `tool_input`）、对话与工具活动流、输入框与中断按钮。
+界面两区：
+
+- **待决权限请求**，含完整 `tool_input`，三个动作：允许、拒绝、总是允许这类
+- **对话区**，Claude 的历次回复 + 输入框 + 中断按钮
 
 连接采用 WebSocket，进入页面时先请求一次 `snapshot` 补齐当前状态，因此浏览器切后台导致断连后重新打开即可恢复，不依赖长连接存活。
 
@@ -228,19 +220,17 @@ Worker 直接托管的单文件 HTML，手机浏览器打开即用，无需在 T
 |---|---|---|---|
 | `PermissionRequest` | 同步 | 仅弹窗时 | 零。该时刻本就在等待人工响应 |
 | `Stop` | 同步 | 每回合末尾一次 | 一次往返，叠加在回合结束时刻 |
-| `PostToolUse` | 否 | 每次工具调用 | 不阻塞主流程，但每次 fork 一个进程 |
+| `PostToolUse` | 否 | 每次 Bash 调用 | 不阻塞主流程，每次 fork 一个进程 |
 
 关键的架构决策是不把中断做成同步 `PreToolUse`。那样会给每次工具调用叠加一次网络往返，一个回合数十次调用即累计数秒，是唯一会实质性拖垮体验的设计。改用 `PostToolUse` + `asyncRewake` 后，同步路径只剩下两个「本来就要等人」的时刻。
 
-余下两个待验证风险：
+去掉工具活动流后，后台 hook 从「每次工具调用」降为「每次 Bash 调用」，进程 fork 频率下降一个数量级。
+
+余下一个待验证风险：
 
 **R1：`Stop` 的每回合往返延迟未知。** hook 子进程继承 `HTTP_PROXY=127.0.0.1:7890`，出站请求可能被路由进代理链路，实际往返可能远高于直连 Cloudflare 边缘的预期值。200ms 无感，1~2 秒则每回合可感知。
 
 缓解：实现第一步先做基线测量（见 11）。若超标，依次尝试 `NO_PROXY` 绕过代理、改用 command hook 加 `curl --noproxy`；仍不达标则为 `Stop` hook 增加本地开关（哨兵文件存在时直接跳过），按需启用远程。
-
-**R2：`PostToolUse` 每次工具调用 fork 进程。** 不阻塞 Claude，但 Windows 上进程启动成本不低，高频工具调用会累积系统资源占用。
-
-缓解：用 hook 的 `if` 字段限定为 `Bash`、`Edit`、`Write`，跳过 `Read`、`Grep`、`Glob` 等高频只读工具。这些工具的活动对手机端观察价值也低。
 
 ## 10. 已知约束
 
@@ -248,8 +238,8 @@ Worker 直接托管的单文件 HTML，手机浏览器打开即用，无需在 T
 
 1. **`Stop` hook 连续阻塞上限 8 次**。Claude Code 在 8 次连续 block 后强制结束回合。中间 Claude 实际执行工作会重置计数，正常来回对话不会触及，纯连续对话需注意
 2. **600 秒空闲窗口**。`Stop` hook 最长阻塞 600 秒，超时后会话真正结束，此后无法从手机唤醒。使用模式是「Claude 完成 → 手机收到通知 → 10 分钟内回复继续」，而非任意时刻唤醒久置会话
-3. **中断是软停**。`asyncRewake` 通过 system reminder 告知 Claude 停止，而非强制终止进程
-4. **`HTTP_PROXY=127.0.0.1:7890` 会被 hook 子进程继承**，hook 的出站请求可能被路由进代理，代理未运行时全线失败。这是实现阶段第一个要实测的点，必要时通过 `NO_PROXY` 或改用 command hook 加 `curl --noproxy` 规避
+3. **中断是软停**。`asyncRewake` 通过 system reminder 告知 Claude 停止，而非强制终止进程；且仅在 Bash 调用后检查，纯编辑类任务不会被叫停
+4. **`HTTP_PROXY=127.0.0.1:7890` 会被 hook 子进程继承**，hook 的出站请求可能被路由进代理，代理未运行时全线失败。这是实现阶段第一个要实测的点（见 9 节 R1）
 5. **Windows 上 command hook 默认使用 Git Bash**，路径与引号需注意；`args` 形式（exec form）无法直接执行 `.cmd`/`.bat` shim
 6. **既有的声音通知 hook 并行运行**，不冲突。官方文档明确所有匹配的 hook 并行执行，且该 hook 不返回 decision，不影响权限决策
 
@@ -258,7 +248,7 @@ Worker 直接托管的单文件 HTML，手机浏览器打开即用，无需在 T
 0. **性能基线测量**（前置，决定后续是否需要退路）：在接入任何逻辑前，先挂一个只做 POST 并立即返回的空 `Stop` hook，测量三种情形下的回合结束耗时——未装 hook、装了且直连、装了且经代理。确认单次往返落在可接受区间（目标 < 300ms）后再继续；超标则先解决 R1
 1. Worker 骨架与 SessionDO 状态机，配套单测
 2. `PermissionRequest` 全链路打通（含手机网页最小版），本地 `wrangler dev` 验证
-3. `Stop` 指令注入
-4. 活动推送与 Notifier
+3. `Stop` 指令注入与回复展示
+4. Notifier 与推送
 5. 中断
 6. 切公网，实测国内网络可达性与推送渠道
