@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { consoleUrl, createNotifier, permissionNotification, stopNotification, type Notifier } from "./notifier";
 import { Pending, readTimeouts } from "./pending";
 import {
   asRecord,
@@ -18,11 +19,13 @@ interface PendingPermissionState {
 }
 
 export class SessionDO extends DurableObject<Env> {
+  private readonly notifier: Notifier;
   private readonly pendingPermissions = new Map<string, PendingPermissionState>();
   private pendingStop: Pending<string> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.notifier = createNotifier(env);
     ctx.blockConcurrencyWhile(async () => {
       this.ctx.storage.sql.exec(`
         CREATE TABLE IF NOT EXISTS recent_messages (
@@ -46,18 +49,18 @@ export class SessionDO extends DurableObject<Env> {
     const path = new URL(request.url).pathname;
     try {
       if (request.method === "POST" && path === "/internal/permission") {
-        const payload = await this.readPayload(request);
-        if (!payload) return jsonResponse({ ok: false }, 400);
-        const decision = await this.waitForPermission(payload);
+        const parsed = await this.readPermissionRequest(request);
+        if (!parsed) return jsonResponse({ ok: false }, 400);
+        const decision = await this.waitForPermission(parsed.payload, parsed.clickUrl);
         return decision ? jsonResponse(decision) : jsonResponse({ ok: false });
       }
       if (request.method === "POST" && path === "/internal/stop") {
         const body = await request.json<unknown>();
         const record = asRecord(body);
         if (!record || typeof record.lastMessage !== "string") return jsonResponse({ ok: false }, 400);
-        const message = record.lastMessage;
-        await this.recordMessage(message);
-        const text = await this.waitForStop();
+        const clickUrl = this.clickUrlFrom(record);
+        await this.recordMessage(record.lastMessage);
+        const text = await this.waitForStop(clickUrl);
         return text ? jsonResponse({ text }) : jsonResponse({ ok: false });
       }
       if (request.method === "POST" && path === "/internal/interrupt") {
@@ -146,18 +149,28 @@ export class SessionDO extends DurableObject<Env> {
     void this.setInterrupt().then(() => this.send(socket, { type: "interrupt_ack" }));
   }
 
-  private async readPayload(request: Request): Promise<PermissionPayload | null> {
+  private clickUrlFrom(record: Record<string, unknown>): string {
+    return consoleUrl(
+      typeof record.origin === "string" ? record.origin : "",
+      typeof record.sessionId === "string" ? record.sessionId : "",
+    );
+  }
+
+  private async readPermissionRequest(request: Request): Promise<{ payload: PermissionPayload; clickUrl: string } | null> {
     const body = await request.json<unknown>();
     const record = asRecord(body);
     if (!record || typeof record.toolName !== "string" || !Array.isArray(record.permissionSuggestions)) return null;
     return {
-      toolName: record.toolName,
-      toolInput: record.toolInput ?? null,
-      permissionSuggestions: record.permissionSuggestions,
+      payload: {
+        toolName: record.toolName,
+        toolInput: record.toolInput ?? null,
+        permissionSuggestions: record.permissionSuggestions,
+      },
+      clickUrl: this.clickUrlFrom(record),
     };
   }
 
-  private async waitForPermission(payload: PermissionPayload): Promise<PermissionDecision | null> {
+  private async waitForPermission(payload: PermissionPayload, clickUrl: string): Promise<PermissionDecision | null> {
     const remote = this.readRemoteMode();
     const pending: PendingPermission = {
       id: crypto.randomUUID(),
@@ -173,10 +186,11 @@ export class SessionDO extends DurableObject<Env> {
     if (!request.waiting) return null;
     this.pendingPermissions.set(pending.id, { payload: pending, request });
     this.broadcast({ type: "permission", id: pending.id, toolName: pending.toolName, toolInput: pending.toolInput, suggestions: pending.permissionSuggestions });
+    if (remote.enabled) void this.notifier.notify(permissionNotification(pending.toolName, clickUrl));
     return request.promise;
   }
 
-  private async waitForStop(): Promise<string | null> {
+  private async waitForStop(clickUrl: string): Promise<string | null> {
     const remote = this.readRemoteMode();
     this.pendingStop?.settle(null);
     let stored = false;
@@ -189,6 +203,7 @@ export class SessionDO extends DurableObject<Env> {
     if (!request.waiting) return null;
     stored = true;
     this.pendingStop = request;
+    if (remote.enabled) void this.notifier.notify(stopNotification(clickUrl));
     return request.promise;
   }
 

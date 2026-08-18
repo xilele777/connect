@@ -49,7 +49,13 @@ async function permissionHook(request: Request, env: Env): Promise<Response> {
     const response = await stub.fetch(new Request(`${INTERNAL_ORIGIN}/internal/permission`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ toolName: parsed.payload.toolName, toolInput: parsed.payload.toolInput, permissionSuggestions: parsed.payload.permissionSuggestions }),
+      body: JSON.stringify({
+        toolName: parsed.payload.toolName,
+        toolInput: parsed.payload.toolInput,
+        permissionSuggestions: parsed.payload.permissionSuggestions,
+        origin: new URL(request.url).origin,
+        sessionId: parsed.sessionId,
+      }),
     }));
     if (!response.ok) return emptyHookResponse();
     const decision = await response.json<unknown>();
@@ -70,7 +76,11 @@ async function stopHook(request: Request, env: Env): Promise<Response> {
     const response = await stub.fetch(new Request(`${INTERNAL_ORIGIN}/internal/stop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ lastMessage: parsed.lastMessage }),
+      body: JSON.stringify({
+        lastMessage: parsed.lastMessage,
+        origin: new URL(request.url).origin,
+        sessionId: parsed.sessionId,
+      }),
     }));
     if (!response.ok) return emptyHookResponse();
     const result = await response.json<unknown>();

@@ -79,4 +79,32 @@ describe("SessionDO state machine", () => {
     expect(snapshot.remoteMode).toBe(false);
     expect(snapshot.expiresAt).toBeNull();
   });
+
+  it("accepts the origin and session id forwarded by the worker", async () => {
+    const stub = env.SESSION.getByName("origin-passthrough");
+    const response = await stub.fetch(new Request("https://session.internal/internal/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lastMessage: "done", origin: "https://worker.test", sessionId: "origin-passthrough" }),
+    }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: false });
+  });
+
+  it("still fails open when remote mode is on but no phone ever connects", async () => {
+    const name = "remote-mode-fail-open";
+    const socket = await connectPhone(name);
+    socket.send(JSON.stringify({ type: "remote_mode", enabled: true }));
+    await sleep(20);
+    socket.close();
+    await sleep(20);
+    const started = Date.now();
+    const response = await env.SESSION.getByName(name).fetch(new Request("https://session.internal/internal/permission", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ toolName: "Bash", toolInput: { command: "pwd" }, permissionSuggestions: [], origin: "https://worker.test", sessionId: name }),
+    }));
+    expect(Date.now() - started).toBeGreaterThanOrEqual(30);
+    expect(await response.json()).toEqual({ ok: false });
+  });
 });
